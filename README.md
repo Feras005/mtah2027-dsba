@@ -1,6 +1,6 @@
 # Team DSBA — solution
 
-**Feras Alsadadi, Talal Kamal, Ali Mohamed.** Our entry is in [`possession/`](possession/), and
+**Feras Alsadadi, Talal Kamal, Ali Mohamed, Mohammed Hejairi.** Our entry is in [`possession/`](possession/), and
 [`run_pipeline.py`](run_pipeline.py) regenerates the submission. The technical document is
 [`SOLUTION.md`](SOLUTION.md) (also as [`DSBA.pdf`](DSBA.pdf)).
 
