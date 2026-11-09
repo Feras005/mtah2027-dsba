@@ -9,7 +9,8 @@ Windows:
 ```bash
 py -m venv .venv
 .venv/Scripts/python -m pip install -r requirements-solution.txt
-# unpack the data bundle into ./data (not included: the data is not redistributable)
+# unpack the data bundle into ./data (tactical + broadcast; not included: not redistributable)
+.venv/Scripts/python fetch_external.py     # Metrica public sample data, pinned commit (needs git)
 .venv/Scripts/python run_pipeline.py      # -> evaluation/results/DSBA.csv, validated
 ```
 
@@ -18,9 +19,13 @@ Linux / macOS:
 ```bash
 python3 -m venv .venv
 .venv/bin/python -m pip install -r requirements-solution.txt
-# unpack the data bundle into ./data (not included: the data is not redistributable)
+# unpack the data bundle into ./data (tactical + broadcast; not included: not redistributable)
+.venv/bin/python fetch_external.py     # Metrica public sample data, pinned commit (needs git)
 .venv/bin/python run_pipeline.py          # -> evaluation/results/DSBA.csv, validated
 ```
+
+The first run takes about 6.5 minutes and caches its work under `data/`; the output is
+deterministic (MD5 `2d6c737b376dc0fd110fd681b913adb2`).
 
 The rest of this README is the organisers' original challenge description.
 

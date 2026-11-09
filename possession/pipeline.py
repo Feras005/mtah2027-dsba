@@ -20,6 +20,7 @@ from games import GAME, GAMES, half_video_blocks, require  # noqa: E402
 
 from . import config as C  # noqa: E402
 from . import deadball, decode, features, pseudo, shape, shape_model, tagging, touches  # noqa
+from . import broadcast, transfer  # noqa: E402
 from .io import FORMAT_STATS, read_atd_meta, read_atd_raw, read_smart_tagging  # noqa: E402
 
 # Published in FAQ.md: the second half is graded from 110,808 but kicks off at 113,742, and every
@@ -29,9 +30,9 @@ KICKOFF_2ND_VIDEO_FRAME = 113742
 DEFAULTS = {
     "use_tagging": True,
     "use_shape": True,
-    # Off: there is no ground-truth-free way to check that snapping helps, and on the synthetic
-    # match it did not (spellF1 0.4534 with vs 0.4635 without, inside the noise band).
-    "snap": False,
+    # On: on the 3 labelled external games, leave-one-game-out, snapping hand-overs and restarts
+    # to detected touches raised spellF1 on every game (mean 0.571 -> 0.581; run_external.py).
+    "snap": True,
     "team_w": C.SHAPE_TEAM_WEIGHT,
     "dead_w": C.SHAPE_DEAD_WEIGHT,
     "gate": True,
@@ -39,6 +40,21 @@ DEFAULTS = {
     "missing_llr": C.MISSING_LLR,
     "dead_gate": True,
     "abstain": False,
+    "switch_cost": C.SWITCH_COST,
+    "stop_cost": C.STOP_COST,
+    "restart_cost": C.RESTART_COST,
+    "min_poss_s": C.MIN_POSSESSION_S,
+    "min_dead_s": C.MIN_DEAD_S,
+    # Models trained on other matches' real labels (learned.py, transfer.py). Weights chosen by
+    # leave-one-game-out spellF1 on those matches (run_external.py tune): 0.540 -> 0.571.
+    "ext_team_w": 0.5,
+    "ext_dead_w": 0.2,
+    "ext_team_gate": False,
+    "use_external": True,
+    # Fill ball gaps from the broadcast feed, aligned by player positions (broadcast.py). Hiding
+    # the tactical ball and refilling from the broadcast recovered the possessions better on
+    # every seed (run_consistency-style test, SOLUTION.md); on the real match it changes 0.6%.
+    "use_broadcast": True,
 }
 
 
@@ -79,7 +95,8 @@ def load(data_dir=None, game=GAME, use_tagging=True, say=log):
         except IOError:
             say("smart tagging: not found, continuing without it")
     return {"pm": pm, "psp": psp, "ball": ball, "slot_team": slot_team, "pitch": pitch,
-            "blocks": blocks, "n": n, "graded": graded, "events": events}
+            "blocks": blocks, "n": n, "graded": graded, "events": events,
+            "kickoff_2nd": KICKOFF_2ND_VIDEO_FRAME}
 
 
 def ball_stage(data, ball_mask=None, say=log):
@@ -103,7 +120,7 @@ def shape_stage(data, feat, say=log, with_dead=True):
     restarts = tagging.set_piece_arrays(data["events"], data["n"], feat["crowd_speed"])[3]
     y_team = pseudo.team_labels(feat)
     y_team = np.where(data["graded"], y_team, -1)
-    y_dead = pseudo.dead_labels(feat, restarts, data["graded"], KICKOFF_2ND_VIDEO_FRAME,
+    y_dead = pseudo.dead_labels(feat, restarts, data["graded"], data["kickoff_2nd"],
                                 data["blocks"])
     say("pseudo-labels: team {} frames ({} home / {} away), dead {} frames, alive {} frames".format(
         int((y_team >= 0).sum()), int((y_team == 0).sum()), int((y_team == 1).sum()),
@@ -136,7 +153,14 @@ def decode_all(data, feat, shp, opts, say=log):
     say("crowd speed mixture: slow {slow_mps:.2f} m/s, fast {fast_mps:.2f} m/s, "
         "slow share {slow_share:.2f}".format(**crowd_info))
     team = feat["team_llr"] + phase + sp_side
-    if shp is not None:
+    if shp is not None and "ext_team" in shp and opts["ext_team_w"]:
+        w = opts["ext_team_w"]
+        if opts["ext_team_gate"]:
+            w = w * (1.0 - np.clip(np.abs(feat["team_llr"]) / C.PROXIMITY_CAP, 0.0, 1.0))
+        team = team + w * shp["ext_team"]
+    if shp is not None and "ext_dead" in shp and opts["ext_dead_w"]:
+        dead = dead + opts["ext_dead_w"] * shp["ext_dead"]
+    if shp is not None and "team_logit" in shp:
         w = opts["team_w"]
         if opts["gate"]:
             # The shape model speaks where the ball cannot: full weight with no proximity
@@ -148,13 +172,18 @@ def decode_all(data, feat, shp, opts, say=log):
             # Where the ball is seen, ball-based dead evidence (out of bounds, ball rolling)
             # is better than shape; the shape model fills in only where it is not.
             wd = wd * (~feat["ball_known"])
-        dead = dead + wd * shp["dead_logit"]
+        if "dead_logit" in shp:
+            dead = dead + wd * shp["dead_logit"]
     em = decode.emissions(team, dead, opts["team_only"])
 
     oob_near = features.rolling_mean(feat["oob"].astype(float), 2 * C.OOB_ANCHOR_FRAMES + 1,
                                      np.ones(n, bool)) > 0
-    stop = np.where(oob_near, C.STOP_COST_AT_OOB, C.STOP_COST)
-    restart = np.where(sp_anchor, C.RESTART_COST_AT_SET_PIECE, C.RESTART_COST)
+    stop = np.where(oob_near, C.STOP_COST_AT_OOB, opts["stop_cost"])
+    restart = np.where(sp_anchor, C.RESTART_COST_AT_SET_PIECE, opts["restart_cost"])
+    kickoff_2nd = data["kickoff_2nd"]
+
+    def absorb(path):
+        return decode.absorb_short_runs(path, opts["min_poss_s"], opts["min_dead_s"])
     tch = touches.detect(feat) if opts["snap"] else None
 
     codes = np.full(n, decode.D, dtype=np.int8)
@@ -166,7 +195,7 @@ def decode_all(data, feat, shp, opts, say=log):
             side = tagging.kickoff_side(events, s)
             init = [0.0 if side != "A" else -3.0, 0.0 if side != "H" else -3.0, decode.NEG]
         else:
-            k = max(0, min(e, KICKOFF_2ND_VIDEO_FRAME) - s)
+            k = max(0, min(e, kickoff_2nd) - s)
             em_h[:k, :2] = decode.NEG / 1e6   # before the kickoff: only D is possible
             em_h[:k, 2] = 0.0
             init = [decode.NEG, decode.NEG, 0.0]
@@ -174,14 +203,14 @@ def decode_all(data, feat, shp, opts, say=log):
                 side = tagging.kickoff_side(events, s + k)
                 if side:
                     em_h[k:k + C.FPS, 0 if side == "H" else 1] += 0.5
-        path = decode.viterbi(em_h, stop[s:e], restart[s:e], np.array(init))
-        path = decode.absorb_short_runs(path)
+        path = decode.viterbi(em_h, stop[s:e], restart[s:e], np.array(init), opts["switch_cost"])
+        path = absorb(path)
         if tch is not None:
             path, m = touches.snap(path, feat, tch, s, e)
             moved += m
-            path = decode.absorb_short_runs(path)
+            path = absorb(path)
         if half == 2:
-            k = max(0, min(e, KICKOFF_2ND_VIDEO_FRAME) - s)
+            k = max(0, min(e, kickoff_2nd) - s)
             path[:k] = decode.D
         codes[s:e] = path
     if tch is not None:
@@ -200,13 +229,35 @@ def decode_all(data, feat, shp, opts, say=log):
     return labels, codes
 
 
+def external_stage(data, feat, say=log):
+    """Models trained on other matches' real labels (transfer.py), applied to this game."""
+    t0 = time.time()
+    if not transfer.available():
+        raise IOError("external training data missing: run `python fetch_external.py` first "
+                      "(or pass --no-external)")
+    cache = os.path.join(ROOT, "data", "external", ".cache")
+    models = transfer.train(cache, say)
+    pred = transfer.predict(models, data, feat,
+                            os.path.join(ROOT, "data", "tactical", ".cache", "learned_X.npz"))
+    say("external models: P(dead) > 0.5 on {:.1f}% of graded frames, P(home | alive) > 0.5 on "
+        "{:.1f}%  ({:.0f} s)".format(100 * (pred["ext_dead"][data["graded"]] > 0).mean(),
+                                     100 * (pred["ext_team"][data["graded"]] > 0).mean(),
+                                     time.time() - t0))
+    return pred
+
+
 def run(data_dir=None, game=GAME, **opts):
     o = dict(DEFAULTS)
     o.update(opts)
     t0 = time.time()
     data = load(data_dir, game, o["use_tagging"])
+    if o["use_broadcast"]:
+        data["ball"], _ = broadcast.filled_ball(data, game,
+                                                os.path.join(ROOT, "data", "broadcast", ".cache"))
     feat = ball_stage(data)
-    shp = shape_stage(data, feat, with_dead=o["dead_w"] > 0) if o["use_shape"] else None
+    shp = shape_stage(data, feat, with_dead=o["dead_w"] > 0) if o["use_shape"] else {}
+    if o["use_external"]:
+        shp.update(external_stage(data, feat))
     labels, _ = decode_all(data, feat, shp, o)
     log("total {:.0f} s".format(time.time() - t0))
     return labels

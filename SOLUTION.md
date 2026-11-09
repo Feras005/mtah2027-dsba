@@ -5,239 +5,279 @@
 More than a Hack 2027, Phase 1: frame-level possession (`H` / `A` / `D` / `X`) for BAR-ATH.
 
 **In one paragraph.** The ball is missing on 41% of graded frames, mostly at the moments that
-decide possession. We read possession from the team's shape instead. A team with the ball spreads
-wide and long; the team without it compacts. We train a ball-free model of that on
-**pseudo-labels** taken from the data itself. We combine it with ball proximity and a dead-ball
-detector in a **3-state HMM (H/A/D)** that pays a high price for switching teams. Every setting
-was chosen with a **ball-masking validation** that needs no ground truth: we hide the ball where
-we know the answer and check that the pipeline still finds it.
+decide possession. We read possession from the players as well as the ball. Two models trained
+on **real labels from three other matches** (Metrica Sports' public sample data) answer the
+decoder's two questions — *is the ball in play?* from restart formations and crowd dynamics, and
+*which team has it?* from team shape plus the ball, trained with the ball hidden at random. A
+third, ball-free shape model is trained on **pseudo-labels** from this match. Their evidence is
+decoded by a **3-state HMM (H/A/D)** that pays a high price for switching teams, and hand-overs
+are snapped to the touch that caused them. Where the tactical tracker loses the ball, the
+**broadcast feed, aligned by player positions**, fills in. Every setting was chosen by
+**leave-one-game-out spellF1 on the external matches**, and checked on this match with a
+ground-truth-free **self-consistency spellF1**. No competition ground truth was used to choose
+anything.
 
 ---
 
 ## Reproduce
 
 ```bash
-py -m venv .venv                                   # Python 3.12
+py -m venv .venv                                   # Python 3.12 (Linux/macOS: python3, .venv/bin/python)
 .venv/Scripts/python -m pip install -r requirements-solution.txt
-# unpack the data bundle into ./data  (data/tactical/BAR-ATH_tactical_atd.txt, ...)
+# unpack the data bundle into ./data  (data/tactical/..., data/broadcast/...)
+.venv/Scripts/python fetch_external.py             # Metrica public sample data, pinned commit (needs git)
 .venv/Scripts/python run_pipeline.py               # -> evaluation/results/DSBA.csv, then validates it
 ```
 
-* One command, about 65 s. The first run also parses and caches the tracking file in
-  `data/tactical/.cache/`, which is gitignored.
-* **Deterministic.** Two runs, and a fresh venv built from the pins, give the identical file
-  (MD5 `97f61dfa580bb6f80156284c834b4873`).
-* `python run_validation.py` re-runs the settings study below.
-* `python synthetic/make_synthetic.py` builds a synthetic match in the same file formats. It is
-  for development only (see the end of this document).
+* One command after the two downloads, about 6.5 min on a laptop the first time (parsing, the
+  broadcast alignment and the feature matrices are then cached under `data/**/.cache/`,
+  gitignored).
+* **Deterministic.** Two runs give the identical file (MD5 `2d6c737b376dc0fd110fd681b913adb2`).
+* `python run_external.py study|tune|extras` re-runs the studies on the external matches,
+  `python run_consistency.py` the self-consistency test, `python run_broadcast.py` the alignment.
+* `--no-external`, `--no-broadcast`, `--no-snap` switch each v3 component off; with all three
+  the pipeline is the v2 that was submitted first.
 
 ## Assets used
 
 | asset | how |
 |---|---|
-| tactical ATD | everything: ball, proximity, team shape, speeds |
+| tactical ATD | everything: ball, proximity, team shape, formations, speeds |
 | Smart Tagging | set pieces → restart anchors; phases → weak team prior (direction learned); kickoff side |
-| homography, videos, broadcast ATD | **not used**: the ATD is already in pitch coordinates, and the broadcast has no time alignment |
+| broadcast ATD | **ball only**: aligned to the tactical timeline by player positions, fills ball gaps |
+| homography, videos | **not used**: both ATDs are already in pitch coordinates |
 | public 5-min ground truth | **only** to check that frames line up and the file is well formed. No setting was chosen with it |
-
-No hand labels, no human-produced data about this game, no external data.
+| Metrica Sports public sample data | **external training and validation data**, see below |
 
 ## Training data
 
 | dataset | source | labelled by | size |
 |---|---|---|---|
-| pseudo-labels (section 2) | the tactical ATD and Smart Tagging of this game | a fixed rule in `possession/pseudo.py`, no person | 15,283 team frames, 16,759 dead frames |
+| Metrica Sports sample games 1–3 | [github.com/metrica-sports/sample-data](https://github.com/metrica-sports/sample-data), commit `e706dd5`, public, anonymised; used with acknowledgement as its README asks | Metrica Sports' event data, converted to H/A/D by a fixed rule (`possession/external.py`) | 3 matches, 427,894 labelled frames (34% dead), 1,044 possessions |
+| pseudo-labels on BAR-ATH | the tactical ATD and Smart Tagging of this match | a fixed rule in `possession/pseudo.py`, no person | 15,283 team frames, 16,759 dead frames |
 
-No other labelled data was used: no hand labels on any game, no ground truth (public or private)
-and no pre-trained models. The unsupervised parts (crowd-speed mixture, phase-tag direction) are
-fitted on this game's tracking without labels.
+No hand labels on the competition game, no ground truth (public or private), no pre-trained
+models. The unsupervised parts (crowd-speed mixture, phase-tag direction) are fitted on this
+match's tracking without labels. The PFF FC World Cup 2022 data (64 matches) would be the next
+addition; it needs a sign-up and was not used.
+
+**Labels from events** (`external.py`): the team in possession is the team of the latest on-ball
+event (pass, carry, shot, recovery, ball lost, set piece), so possession changes at the first
+on-ball event of the other side — the interception a `RECOVERY` marks. The ball is dead from a
+`BALL OUT`, a shot that goes out or in, a foul or an offside, until the restart that follows
+(`SET PIECE`, or a goal-kick pass).
 
 ---
 
 ## Pipeline
 
 ```
-ATD --> ball features (proximity, speed, OOB) ---------------------------+
- |                                                                       |
- +----> team-shape features --> shape model (pseudo-labels, cross-half) -+
- |                                                                       |
- +----> collective speed --> dead-ball detector -------------------------+
-                                                                         |
-Smart Tagging --> set-piece restarts, phase prior -----------------------+
-                                                                         |
-                                                                         v
-                                                3-state HMM / Viterbi --> DSBA.csv
+tactical ATD --> ball features (proximity, speed, OOB) -------------------------+
+ |      ^                                                                        |
+ |      +-- broadcast ATD, aligned by player positions, fills ball gaps          |
+ |                                                                               |
+ +--> team shape --> pseudo-label shape model (this match, cross-half) ----------+
+ |                                                                               |
+ +--> formations + crowd dynamics --> DEAD model (trained on 3 other matches) ---+
+ |                                                                               |
+ +--> shape + ball (hidden at random) --> TEAM model (trained on 3 other matches)+
+ |                                                                               |
+ +--> collective speed --> rule-based dead-ball evidence ------------------------+
+                                                                                 |
+Smart Tagging --> set-piece restarts, phase prior -------------------------------+
+                                                                                 v
+                                   3-state HMM / Viterbi --> snap to touches --> DSBA.csv
 ```
 
 ### 1. Ball features (`possession/features.py`)
 
 * **Ball cleaning:** drop implausible and teleporting detections (faster than 40 m/s). Bridge
   occlusions of ≤ 0.4 s.
-* **Proximity log-odds:** `clip(d_away − d_home, ±3)`, using each team's nearest player. It is
-  scaled down when nobody is within ~2.5 m and when the ball is in flight (> 7 m/s). A loose ball
-  therefore carries no evidence, and possession stays with the last team, as CHALLENGE.md asks.
+* **Proximity log-odds:** `clip(d_away − d_home, ±3)`, using each team's nearest player, scaled
+  down when nobody is within ~2.5 m and when the ball is in flight (> 7 m/s). A loose ball carries
+  no evidence, so possession stays with the last team, as CHALLENGE.md asks.
 * **Out of bounds:** the ball is seen more than 0.75 m outside the lines.
-* **Collective speed:** median player speed, smoothed over 2 s.
 
-### 2. Pseudo-labels (`possession/pseudo.py`)
+### 2. Broadcast ball (`possession/broadcast.py`)
 
-Frames whose answer is obvious, chosen by a fixed rule, never by a person:
+The broadcast ATD is on its own timeline, with cuts and replays, and no mapping is provided. But
+both feeds are real-time recordings of the same match, so live broadcast footage sits at a fixed
+frame offset from the tactical video. We find it from the players alone: for 400 broadcast
+frames, the cost of each tactical frame is the median distance from each broadcast player to the
+nearest tactical player (one-way, since the TV camera sees a subset). 391 of 400 sampled frames
+matched, voting for exactly two offsets, one per half (4,014 and 26,914 frames). Each broadcast
+frame is then accepted only where its players match within 1 m; replays and close-ups fail.
 
-* **team:** the ball is observed and slow (< 5 m/s), a player is within 1 m of it, and nobody
-  from the other team is within 3 m. That gives 15,283 frames (9,490 home, 5,793 away).
-* **dead:** the ball is seen out of bounds, a tagged set piece before its estimated restart, or
-  the graded frames before the published 2nd-half kickoff. That gives 16,759 frames.
+* Aligned on 57% of graded frames; where both feeds see the ball they agree to 1.2 m (median).
+* It fills the ball on 3.6% of graded frames (59.3% → 63.0%): the broadcast mostly loses the ball
+  when the tactical tracker does.
+* **Check:** hide the tactical ball on 40% of frames and refill from the broadcast. Against the
+  decode with the ball visible, spellF1 rose on all three seeds (0.873 → 0.887, 0.838 → 0.874,
+  0.851 → 0.899). On the real match it changes 0.6% of labels.
 
-### 3. Team-shape model (`possession/shape.py`, `possession/shape_model.py`)
+### 3. Models trained on other matches (`possession/learned.py`, `possession/transfer.py`)
 
-* **Features.** There are 55 ball-free features per frame. Per team: centroid,
-  width, length, spread, the height of the deepest outfield player, the most advanced player,
-  players in the opponent half, speed, "push" (centroid velocity towards goal), and free space
-  (mean distance to the nearest opponent). For each we also use home minus away, its 1 s average
-  and its 2 s trend.
-* **Orientation.** Everything is measured towards the team's own attacking goal. The attacking
-  direction is found per half from the data (the deepest player sits at the goal the team
-  defends), not hard-coded.
-* **Model.** Gradient-boosted trees (`HistGradientBoostingClassifier`), trained **cross-half**:
-  the model that predicts half 1 never saw half 1. Every prediction the pipeline uses is
-  therefore out-of-sample.
+Gradient-boosted trees (`HistGradientBoostingClassifier`), one per decoder question.
 
-| held-out half | accuracy vs pseudo-labels | AUC | logistic-regression AUC |
-|---|---|---|---|
-| 1 | 0.864 | 0.934 | 0.906 |
-| 2 | 0.876 | 0.940 | 0.913 |
+**Dead model — P(ball out of play), ball-free on purpose.** In the sample games the ball is
+almost never tracked while play is stopped (7–21% of dead frames, against ~65% in BAR-ATH), so
+a model that saw the ball would learn "no ball = stoppage", an artefact that would not transfer.
+It learns stoppages from **positive evidence in the players**, as restart formations:
 
-**What it learned**, by permutation importance (drop in AUC):
+* throw-in: the nearest player to a touchline, players beyond the lines
+* corner: the nearest player to a corner flag, players in each penalty box
+* goal kick: players in the six-yard boxes, nearest player to a goal line
+* kick-off: players in the centre circle, mean distance from the halfway line
+* the whole team slowing down and staying slow: crowd speed now, over 3/6/12 s, the 6 s minimum,
+  the 3 s before and after (the pick-up at a restart), players standing still
+* plus the 55 team-shape features of section 4
 
-1. home-minus-away lateral spread (`diff_sy`)
-2. home-minus-away distance from the centre line (`diff_cy_abs`)
-3. home-minus-away length, 1 s average
-4. home speed
-5. away lateral spread
-6. home-minus-away depth spread
-7. the 2 s trend of the push towards goal
+**Team model — P(home | alive).** Team shape plus the ball features (proximity, distances, ball
+speed, whether the ball is known). In training, the ball is **hidden on random 1–8 s blocks
+covering 40% of frames**, so the model learns to fall back on shape when the ball is gone.
 
-In plain words: **the team with the ball is the wider one**, which is the classic
-coaching idea of "make the pitch big in possession". The trees add about 0.03 AUC over a
-linear model.
+Leave-one-game-out (trained on two matches, tested on the third):
 
-**Into the HMM.** The model's log-odds enter at weight 0.2 per frame. The weight is *gated*: full
-weight when proximity says nothing, zero when a player is clearly on the ball.
+| held-out game | dead model AUC | team model AUC |
+|---|---|---|
+| Sample game 1 | 0.832 | 0.921 |
+| Sample game 2 | 0.869 | 0.945 |
+| Sample game 3 | 0.897 | 0.942 |
 
-### 4. Dead-ball detector (`possession/deadball.py`, `possession/tagging.py`)
+For BAR-ATH, both are trained on all three matches. Their log-odds enter the decoder at weights
+0.2 (dead) and 0.5 (team), chosen as below.
 
-Log-odds of dead vs live, summed per frame from four sources:
+### 4. Pseudo-label team-shape model (`possession/shape.py`, `possession/shape_model.py`)
 
-* **Ball seen out of bounds:** +4.
-* **Collective speed:** a 2-component Gaussian mixture fitted **without labels** to log crowd
-  speed. It found a slow component at 0.66 m/s and a fast one at 1.54 m/s.
-* **Ball rolling inside the pitch / ball unseen:** −0.7 and +0.15. Checked against the tags:
-  the ball is unseen in 35% of tagged-dead frames vs 18% of tagged attacking-phase frames, so
-  "unseen" really is evidence of a stoppage.
-* **Set pieces:** dead before the estimated restart, live just after it.
-* **Finding the restart.** We measured the tag windows (aggregates only). Kickoffs are ~5 s
-  windows, but every other set piece is a fixed 35 s window in which the players speed up only
-  20–30% of the way in. So the restart is **estimated per set piece** as the moment of the
-  biggest rise in collective speed. Our first version used the window's midpoint, which marked
-  ~10 s of live play after each set piece as dead. Fixing it raised the validation score from
-  0.697 to 0.747 without the shape model, and from 0.715 to 0.780 with it.
+Unchanged from v2: 55 ball-free features per frame (centroid, width, length, spread, defensive
+line, most advanced player, players in the opponent half, speed, push towards goal, free space;
+home-minus-away, 1 s mean, 2 s trend), oriented by an attacking direction inferred per half,
+trained **cross-half** on this match's pseudo-labels (AUC 0.934 / 0.940 against the
+pseudo-labels; logistic regression 0.906 / 0.913). Its top features say **the team with the ball
+is the wider one**. Weight 0.2, gated off when a player is clearly on the ball.
 
-### 5. Smart Tagging phases, with self-calibrated direction
+Pseudo-labels (`possession/pseudo.py`): *team* where the ball is observed and slow (< 5 m/s), a
+player is within 1 m and no opponent within 3 m; *dead* where the ball is seen out, in a tagged
+set piece before its estimated restart, or before the published second-half kickoff.
 
-Each phase code adds at most ±0.25 log-odds per frame towards its tagged team. The **sign is
-learned**: on frames where proximity is confident, how often does the tagged team have the ball?
-Every `DEFENDING …` code and `DEFENSIVE TRANSITION` came out negative (agreement 0.11–0.38), so
-the tag names the team *without* the ball. `BUILD UP` and `PROGRESSION` came out at 0.86–0.89
-agreement. No assumption about what the codes mean was needed.
+### 5. Rule-based dead-ball evidence (`possession/deadball.py`, `possession/tagging.py`)
 
-### 6. Decoder (`possession/decode.py`)
+Log-odds of dead vs live per frame: ball seen out of bounds +4; a 2-component Gaussian mixture on
+log crowd speed fitted without labels (slow 0.66 m/s, fast 1.54 m/s); ball rolling inside the
+pitch −0.7, ball unseen +0.15; tagged set pieces dead before the estimated restart and live after.
+The restart is estimated per set piece as the largest rise in crowd speed, because set-piece tags
+are fixed 35 s windows in which play resumes only 20–30% of the way in.
 
-* **States:** H, A, D, decoded with Viterbi per half.
-* **Emissions:** team evidence only decides *which* team. It never makes "alive" look more
-  likely than "dead"; that is left to the dead-ball detector. (Measured before the restart fix,
-  this raised the validation score from 0.608 to 0.697.)
-* **Transition costs**, in log-likelihood units:
+### 6. Smart Tagging phases, with self-calibrated direction
 
-  | transition | cost | cheaper where |
-  |---|---|---|
-  | H ↔ A | 14 | never. A touch, a deflection or a lost aerial duel cannot pay for it |
-  | live → dead | 7 | 1.5 near a ball seen out |
-  | dead → live | 7 | 2 within 3 s of an estimated restart |
+At most ±0.25 log-odds per frame towards the tagged team, with the **sign learned**: on frames
+where proximity is confident, every `DEFENDING …` code came out negative (the tag names the team
+*without* the ball), `BUILD UP` and `PROGRESSION` positive.
 
-* **Half boundaries:** half 1 starts live, biased to the tagged kickoff side. Half 2 is dead
-  until the published kickoff (frame 113,742, FAQ.md).
-* **Clean-up:** possessions under 0.8 s and stoppages under 1.2 s are absorbed into their
-  neighbours.
+### 7. Decoder (`possession/decode.py`) and snapping (`possession/touches.py`)
+
+* **States:** H, A, D, decoded with Viterbi per half. Team evidence only decides *which* team; it
+  never makes "alive" more likely than "dead", which is left to the dead-ball evidence.
+* **Transition costs** (log-likelihood units): H ↔ A 14; live → dead 7 (1.5 near a ball seen
+  out); dead → live 7 (2 within 3 s of an estimated restart). Possessions under 0.8 s and
+  stoppages under 1.2 s are absorbed.
+* **Snapping:** each hand-over is moved to the first touch by the new team after the old team's
+  last touch, each restart to the first touch by the restarting team, each stoppage to the first
+  frame the ball is seen out — if one lies within 1 s. A touch is a jump in the ball's velocity
+  (≥ 4 m/s) with a player within 2 m.
+* **Half boundaries:** half 1 starts live, biased to the tagged kickoff side; half 2 is dead until
+  the published kickoff (frame 113,742, FAQ.md).
 
 ### Possession rules as implemented
 
 * **Loose or contested ball:** no team evidence, so the last team keeps it.
-* **Change of possession:** needs *sustained* control by the other side. About 5+ frames of
-  strong proximity, or a longer stretch of shape evidence, pays the switch cost.
-* **Restarts:** the set piece anchors the moment play resumes. The side comes from the tag where
+* **Change of possession:** needs *sustained* control by the other side (the switch cost), and
+  is then placed at the new team's first touch.
+* **Restarts:** the set piece anchors the moment play resumes; the side comes from the tag where
   it names one, otherwise from proximity. Throw-ins are tagged `N/A`.
 * **Dead ball:** always `D`. We never assign a team to a dead ball.
 
 ---
 
-## How settings were chosen: ball-masking validation (`possession/validate.py`)
+## How settings were chosen
 
-We could not tune on the ground truth, so we built a test that needs none.
+### On real labels: leave-one-game-out spellF1 on the external matches (`run_external.py`)
 
-1. Take frames whose answer is known from the data (the pseudo-labels).
-2. Hide the ball in 2–6 s blocks around them: 15% of graded frames, half centred on team
-   frames and half on dead frames, with a fixed seed.
-3. Re-run the whole pipeline. The shape model, trained cross-half on unmasked data, never saw
-   the half it predicts.
-4. Score **balanced recovery**: the mean of "right team" on hidden team frames and "dead" on
-   hidden dead frames.
+The pipeline runs on each sample match exactly as on BAR-ATH (without Smart Tagging, which they
+do not have), with the learned models trained on the other two, and is scored with the
+**official scorer** against the event labels.
 
-All rows below include the per-set-piece restart estimate.
+| configuration | mean spellF1 | per game | possessions (truth 348) |
+|---|---|---|---|
+| v2 pipeline, as first submitted | 0.540 | 0.540 / 0.550 / 0.528 | 260 |
+| + dead model, weight 0.2 | 0.563 | 0.560 / 0.576 / 0.553 | 261 |
+| + team model, weight 0.5 | 0.560 | 0.552 / 0.563 / 0.564 | 276 |
+| + both | 0.571 | 0.554 / 0.577 / 0.583 | 273 |
+| **+ snapping to touches (v3)** | **0.581** | 0.556 / 0.588 / 0.601 | 270 |
+| + self-training, 1 round | 0.565 | 0.556 / 0.563 / 0.577 | 265 |
+| + self-training, 2 rounds | 0.566 | 0.559 / 0.566 / 0.574 | 263 |
 
-| configuration | balanced | team | dead | possessions |
-|---|---|---|---|---|
-| no shape model, v1 emissions | 0.699 | 0.566 | 0.832 | 274 |
-| no shape model, team-only emissions | 0.747 | 0.524 | 0.971 | 276 |
-| **+ team-shape model, weight 0.2 (chosen)** | **0.780** | 0.588 | 0.972 | 281 |
-| + team-shape model, weight 0.4 | 0.781 | 0.590 | 0.972 | 311 |
-| + dead-shape model, weight 0.05 | 0.761 | 0.628 | 0.894 | 282 |
-| + dead-shape model, weight 0.2 | 0.708 | 0.685 | 0.730 | 301 |
+**Decoder settings.** The costs we had set by hand as football priors were tuned by coordinate
+ascent over a grid (two rounds): switch cost 5–18, stop and restart costs 3–12, minimum stoppage
+0.4–3 s, minimum possession 0.2–1.2 s, model weights. **The hand-set values were already the
+best**: switch cost 14 beat 5 (0.558), 9 (0.560), 11 (0.565) and 18 (0.571); stop and restart
+cost 7 beat 3, 5, 9 and 12. Two changes scored marginally higher (minimum stoppage 2 s, +0.0024;
+shape weight 0.4, +0.003); we only adopt a change worth at least 0.005, since smaller ones cannot
+be told apart from fitting three matches, so neither was taken.
 
-**Reading the table:**
+### On this match, without ground truth: self-consistency spellF1 (`run_consistency.py`)
 
-* With the ball hidden, the shape model cuts **wrong-team** calls from 13.3% to about 5%.
-* Weights 0.2 and 0.4 recover equally well, but 0.4 produces 30 more possessions. We took the
-  more conservative 0.2.
-* The remaining team-frame errors are calls of `D` during live play with the ball hidden. This is
-  the hardest case: a slow build-up looks like a stoppage.
+Decode the match with the ball as tracked, decode it again with the ball hidden on random 1–8 s
+blocks covering 40% of frames, and score the second against the first with the official scorer.
+It scores whole possessions, so a possession split by a false stoppage shows up directly. On its
+own it cannot choose settings — a decoder that never changes its mind agrees with itself
+perfectly — so it is a check, not the target.
 
-**Tried and dropped:**
+| version | self-consistency spellF1 (3 seeds) | possessions, ball visible |
+|---|---|---|
+| v2 | 0.825 | 301 |
+| + learned models | 0.851 | 325 |
+| **+ snapping (v3)** | **0.854** | 323 |
 
-* **A ball-free dead-ball shape model** (AUC 0.82–0.85 cross-half): it traded dead accuracy for
-  team accuracy and lowered the balanced score at every weight tried.
-* **Snapping boundaries to detected touches** (`--snap`): we have no ground-truth-free way to
-  check it, and on the synthetic match it made no difference (0.453 vs 0.464 spellF1, inside the
-  noise band).
+v3 is more stable *and* finds more possessions, so the gain is not from switching less.
+
+### Earlier: frame-level ball masking (`possession/validate.py`)
+
+The v2 settings (shape weight 0.2, team-only emissions, restart estimate) were chosen by hiding
+the ball around pseudo-labelled frames and scoring recovery (0.699 → 0.780 balanced accuracy).
+It checks frames, not possessions, which is why the two tests above were added.
+
+### Tried and dropped
+
+* **Self-training** (decode, take frames ≥ 2 s inside decoded runs of ≥ 6 s as new labels,
+  retrain, repeat): ~107,000 extra frames per match, but spellF1 *fell* (0.571 → 0.565 / 0.566).
+  The model learns its own mistakes back.
+* **A dead-ball shape model on pseudo-labels:** lowered the v2 masking score at every weight; the
+  dead model trained on real labels replaces it.
 * **Writing `X` mid-possession** (`--abstain`): the scorer forward-fills `X`, so spellF1 cannot
-  change, while macroF1, the tie-break, drops (−0.06 on the synthetic match).
+  change, while macroF1 drops.
+* **Where the public ground truth places a switch** (at the touch or at the pass): not studied.
+  The touch convention follows from the event labels of the external matches.
 
 ## Result
 
-* **Output:** 301 possessions, mean 14.8 s, 30% of graded frames `D`.
-* **Public 5 minutes:** spellF1 0.42 vs 0.33 for the published floor `baseline_smooth50`, and
-  macroF1 0.68 vs 0.62. This is a correctness check only: 17 possessions cannot rank anything.
+* **Output:** 327 possessions (mean 12.1 s, median 7.5 s), 121 stoppages, 38% of graded frames `D`.
+* **Public 5 minutes:** spellF1 0.518 (v2: 0.422) vs 0.326 for the published floor
+  `baseline_smooth50`; macroF1 0.80 (v2: 0.68). A correctness check only: 17 possessions cannot
+  rank anything, and nothing was chosen with it.
 
 ## Limitations, and what we would do next
 
-* **Live vs dead with the ball hidden** is the weakest part: ~40% of hidden live frames come out
-  `D`. A better dead model would need cleaner pseudo-labels for fouls and stoppages that have no
-  tag.
-* **The fixed priors** (switch cost, stop and restart costs) were not tuned. The masking
-  validation measures recovery, not over-switching, so tuning them with it would be unsafe.
-* **The broadcast feed** could fill ball gaps if it were aligned to the tactical timeline. We
-  did not attempt that.
-* **Pseudo-labels inherit the proximity rule's blind spots** (balls in the air, crowded boxes).
-  We kept them strict for that reason.
+* **Labels from another provider's events** are not the competition's ground truth: where a
+  switch is placed, and how a stoppage is cut, may differ. More matches (PFF FC World Cup 2022, 64
+  games) would also shrink the noise on every comparison above.
+* **Possessions are still under-counted** on the external matches (270 vs 348): the missing ones
+  are short, and lowering the switch cost to catch them costs more than it gains.
+* **The dead model sees no ball**, by design; it cannot use a ball last seen near a line, because
+  in the training matches the ball is not tracked during stoppages.
+* **The broadcast** adds little ball (3.6% of frames), because both feeds tend to lose it at the
+  same moments.
+* **Smart Tagging** cannot be validated externally, since the sample matches have none.
 
 ## Synthetic data
 
@@ -248,5 +288,6 @@ of the real match and was not used to choose any setting.
 
 ## Data handling
 
-`data/`, `synthetic_data/` and `.cache/` are gitignored. The pipeline prints only counts, shares,
-fitted aggregates and model metrics, never tracking rows.
+`data/` (competition bundle, external sample data, caches) and `synthetic_data/` are gitignored.
+The pipeline prints only counts, shares, fitted aggregates and model metrics, never tracking
+rows.

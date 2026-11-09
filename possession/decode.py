@@ -39,11 +39,11 @@ def emissions(team, dead, team_only=True):
     return np.stack([lh, la, dead], axis=1)
 
 
-def viterbi(em, stop_cost, restart_cost, init):
+def viterbi(em, stop_cost, restart_cost, init, switch_cost=None):
     """Best state path. em [N,3]; stop/restart costs [N] (cost of entering D / leaving D at t)."""
     n = len(em)
     back = np.zeros((n, 3), dtype=np.int8)
-    sw = C.SWITCH_COST
+    sw = C.SWITCH_COST if switch_cost is None else switch_cost
     vh, va, vd = (init[0] + em[0, 0], init[1] + em[0, 1], init[2] + em[0, 2])
     e = em.tolist()
     sc = stop_cost.tolist()
@@ -94,11 +94,12 @@ def runs(codes):
     return [(int(s), int(e), int(codes[s])) for s, e in zip(starts, ends)]
 
 
-def absorb_short_runs(codes):
+def absorb_short_runs(codes, min_poss_s=None, min_dead_s=None):
     """Repeatedly hand the shortest too-short run to its longer neighbour."""
     codes = codes.copy()
-    min_len = {H: int(C.MIN_POSSESSION_S * C.FPS), A: int(C.MIN_POSSESSION_S * C.FPS),
-               D: int(C.MIN_DEAD_S * C.FPS)}
+    mp = C.MIN_POSSESSION_S if min_poss_s is None else min_poss_s
+    md = C.MIN_DEAD_S if min_dead_s is None else min_dead_s
+    min_len = {H: int(mp * C.FPS), A: int(mp * C.FPS), D: int(md * C.FPS)}
     while True:
         rs = runs(codes)
         if len(rs) < 2:

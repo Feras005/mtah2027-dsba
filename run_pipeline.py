@@ -28,12 +28,16 @@ if __name__ == "__main__":
                    help="write X on long ball occlusions inside possessions (see SOLUTION.md: "
                         "free on spellF1, costs macroF1)")
     p.add_argument("--no-shape", action="store_true", help="v1: no team-shape models")
-    p.add_argument("--snap", action="store_true", help="touch-based boundary snapping (off: "
-                   "unvalidated, see SOLUTION.md)")
+    p.add_argument("--no-snap", action="store_true", help="no touch-based boundary snapping")
+    p.add_argument("--no-external", action="store_true",
+                   help="v2: no models trained on the external labelled games")
+    p.add_argument("--no-broadcast", action="store_true",
+                   help="do not fill ball gaps from the aligned broadcast feed")
     args = p.parse_args()
 
     labels = run(args.data_dir, use_tagging=not args.no_tagging, abstain=args.abstain,
-                 use_shape=not args.no_shape, snap=args.snap)
+                 use_shape=not args.no_shape, snap=not args.no_snap,
+                 use_external=not args.no_external, use_broadcast=not args.no_broadcast)
     path = write_submission(args.out, labels)
     print("wrote {}\n".format(os.path.relpath(path, HERE)))
     sys.exit(subprocess.call([sys.executable, os.path.join(HERE, "evaluation",
