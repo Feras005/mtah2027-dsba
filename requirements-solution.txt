@@ -1,0 +1,11 @@
+# Pinned environment for run_pipeline.py, run_validation.py and synthetic/make_synthetic.py
+# (Python 3.12). A fresh venv from this file reproduces evaluation/results/DSBA.csv byte for byte.
+numpy==2.1.3
+pandas==2.2.3
+scikit-learn==1.5.2
+scipy==1.18.1
+joblib==1.6.0
+threadpoolctl==3.8.0
+python-dateutil==4.0.0
+pytz==2026.6
+tzdata==2026.6
