@@ -2,13 +2,24 @@
 
 **Feras Alsadadi, Talal Kamal, Ali Mohamed, Mohammed Hejairi.** Our entry is in [`possession/`](possession/), and
 [`run_pipeline.py`](run_pipeline.py) regenerates the submission. The technical document is
-[`SOLUTION.md`](SOLUTION.md) (also as [`DSBA.pdf`](DSBA.pdf)).
+[`DSBA.pdf`](DSBA.pdf); [`SOLUTION.md`](SOLUTION.md) is its source notes.
+
+Windows:
 
 ```bash
 py -m venv .venv
 .venv/Scripts/python -m pip install -r requirements-solution.txt
 # unpack the data bundle into ./data (not included: the data is not redistributable)
 .venv/Scripts/python run_pipeline.py      # -> evaluation/results/DSBA.csv, validated
+```
+
+Linux / macOS:
+
+```bash
+python3 -m venv .venv
+.venv/bin/python -m pip install -r requirements-solution.txt
+# unpack the data bundle into ./data (not included: the data is not redistributable)
+.venv/bin/python run_pipeline.py          # -> evaluation/results/DSBA.csv, validated
 ```
 
 The rest of this README is the organisers' original challenge description.
